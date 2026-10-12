@@ -17,7 +17,7 @@ tabs, notifications and system sounds stay out of the file.
   PipeWire/PulseAudio monitor) for sound a tab does not hand over, with a
   built-in setup guide for macOS, Windows and Linux.
 - Unsaved recordings survive a browser crash and can be saved afterwards.
-- Interface in English, Russian and Ukrainian.
+- Interface in English and Ukrainian.
 
 Requires Firefox 140 or newer (Firefox for Android 142 or newer).
 
