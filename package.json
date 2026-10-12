@@ -1,0 +1,21 @@
+{
+  "name": "audio-recording-tab",
+  "version": "0.1.0",
+  "description": "Firefox extension that records the sound of a browser tab to MP3 or WAV",
+  "license": "GPL-3.0-only",
+  "author": "SPYder4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "pack": "node scripts/build.mjs && node scripts/pack.mjs",
+    "lint": "node scripts/build.mjs && web-ext lint --source-dir dist",
+    "test": "node test/worker-drift.mjs && node scripts/build.mjs && node test/run.mjs"
+  },
+  "devDependencies": {
+    "geckodriver": "^7.0.0",
+    "lamejs": "^1.2.1",
+    "selenium-webdriver": "^4.46.0",
+    "web-ext": "^10.7.0"
+  }
+}

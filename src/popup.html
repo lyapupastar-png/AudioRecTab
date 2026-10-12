@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"></head>
+<body>
+<h1>AudioRecTab</h1>
+<button id="btn"></button>
+<button id="btn2"></button>
+<button id="btn3" class="dev"></button>
+<div id="info"></div>
+<div id="err" hidden></div>
+<label>
+<span data-i18n="bitrate"></span>
+<select id="kbps"><option>128</option><option>192</option><option>256</option><option>320</option><option value="0">WAV</option></select>
+</label>
+<label class="col">
+<span data-i18n="name_tpl"></span>
+<input id="nameTpl">
+</label>
+<div id="rec" hidden><div data-i18n="recovered"></div><ul id="list"></ul></div>
+<script src="popup.js"></script>
+</body></html>

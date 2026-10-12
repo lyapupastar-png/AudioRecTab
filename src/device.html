@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>AudioRecTab</title><link rel="stylesheet" href="device.css"></head>
+<body>
+<main>
+<h1 data-i18n="device_title"></h1>
+<p data-i18n="device_intro"></p>
+<button id="allow" data-i18n="device_allow"></button>
+<label><span data-i18n="device_select"></span><select id="dev" disabled></select></label>
+<div class="meter"><div id="bar"></div></div>
+<div id="warn" hidden></div>
+<label><span data-i18n="bitrate"></span>
+<select id="kbps"><option>128</option><option>192</option><option>256</option><option>320</option><option value="0">WAV</option></select></label>
+<button id="btn" disabled></button>
+<div id="info"></div>
+<div id="err" hidden></div>
+<details id="help">
+<summary data-i18n="help_title"></summary>
+<label><span data-i18n="help_system"></span>
+<select id="os"><option value="mac">macOS</option><option value="win">Windows</option><option value="linux">Linux</option></select></label>
+<ol id="steps"></ol>
+<ul id="links"></ul>
+<p data-i18n="help_drivers"></p>
+</details>
+</main>
+<script src="device.js"></script>
+</body></html>

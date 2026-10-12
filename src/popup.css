@@ -1,0 +1,18 @@
+body{font:13px system-ui,sans-serif;width:270px;margin:0;padding:12px;color:#1f2937}
+h1{font-size:15px;margin:0 0 10px}
+button{width:100%;padding:9px;border:0;border-radius:6px;background:#1f2937;color:#fff;font-size:13px;cursor:pointer}
+button.rec{background:#d32f2f}
+button.wait{background:#f57c00}
+button+button{margin-top:6px}
+button:disabled{opacity:.6}
+#info{margin:8px 0;min-height:16px}
+#err{margin:6px 0;padding:6px;background:#fde8e8;border-radius:4px}
+label{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+ul{list-style:none;margin:4px 0 0;padding:0}
+li{display:flex;justify-content:space-between;align-items:center;gap:6px;margin:3px 0}
+li span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+li button{width:auto;padding:3px 8px;font-size:12px}
+button.dev{background:#455a64}
+
+label.col{flex-direction:column;align-items:stretch;gap:3px}
+input{font:inherit;padding:4px;box-sizing:border-box;width:100%}
