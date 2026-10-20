@@ -43,15 +43,40 @@ function id3(m) {
     h.set(b, 10);
     return h;
   };
-  const parts = [
-    fr('TIT2', m.title || m.host || 'AudioRecTab'), fr('TPE1', m.host || 'AudioRecTab'),
-    fr('TALB', 'AudioRecTab'), fr('TYER', String(new Date(m.startedAt).getFullYear()))
-  ];
+  const parts = [];
+  if (m.title) parts.push(fr('TIT2', m.title));
+  if (m.artist) parts.push(fr('TPE1', m.artist));
+  if (!parts.length) return new Blob([]);
   const size = parts.reduce((a, p) => a + p.length, 0), head = new Uint8Array(10);
   head.set(enc.encode('ID3'));
   head[3] = 3;
   head[6] = (size >> 21) & 127; head[7] = (size >> 14) & 127; head[8] = (size >> 7) & 127; head[9] = size & 127;
   return new Blob([head, ...parts]);
+}
+
+function splitTags(s) {
+  s = s.replace(/\s+/g, ' ').trim();
+  const m = s.match(/^(.+?)\s*[-–—]\s+(.+)$/) || s.match(/^(.+?)\s+[-–—]\s*(.+)$/);
+  return m ? { artist: m[1].trim(), title: m[2].trim() } : { artist: '', title: s };
+}
+
+function tabTags(raw, host) {
+  let s = (raw || '').replace(/^\(\d+\+?\)\s*/, '').trim();
+  if (/soundcloud/i.test(host || '')) {
+    const m = s.match(/^(?:Listen to|Stream)\s+(.+?)\s+by\s+([^|]+?)(?:\s+in\s+[^|]*)?\s+(?:online for free\s+)?on SoundCloud$/i)
+      || s.match(/^Stream\s+(.+?)\s+by\s+(.+?)\s*\|/i);
+    if (m) return { title: m[1].trim(), artist: m[2].trim() };
+  }
+  s = s.replace(/\s+[-–—|]\s+YouTube(?: Music)?$/i, '');
+  return splitTags(s);
+}
+
+function tagsFor(m, tpl) {
+  if (tpl && !tpl.includes('{title}')) {
+    const own = tpl.replace(/\{(date|time|host)\}/g, ' ');
+    if (own.trim()) return splitTags(own);
+  }
+  return tabTags(m.title, m.host);
 }
 
 // ---------- saving ----------
@@ -68,10 +93,10 @@ async function saveRec(m) {
   const chunks = await getChunks(m.id);
   if (!chunks.length) { await delRec(m.id); return false; }
   const wav = m.fmt === 'wav';
-  const url = URL.createObjectURL(new Blob([wav ? wavHeader(chunks.reduce((n, c) => n + c.length, 0), m.sr || 44100) : id3(m), ...chunks], { type: wav ? 'audio/wav' : 'audio/mpeg' }));
+  const { nameTpl } = await browser.storage.local.get('nameTpl');
+  const url = URL.createObjectURL(new Blob([wav ? wavHeader(chunks.reduce((n, c) => n + c.length, 0), m.sr || 44100) : id3(tagsFor(m, nameTpl)), ...chunks], { type: wav ? 'audio/wav' : 'audio/mpeg' }));
   const d = new Date(m.startedAt), p = (n) => String(n).padStart(2, '0');
   const clean = (v) => v.replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim();
-  const { nameTpl } = await browser.storage.local.get('nameTpl');
   const vars = { title: m.title || m.host || 'tab', host: m.host || '', date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`, time: `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}` };
   const name = clean((nameTpl || '{title} {date} {time}').replace(/\{(title|host|date|time)\}/g, (x, k) => vars[k])).slice(0, 120) || 'tab';
   try {
@@ -102,6 +127,8 @@ function updateIcon() {
 }
 function badge(tabId, on, text = 'REC', color = '#d32f2f') {
   updateIcon();
+  if (browser.pageAction) browser.pageAction.setIcon({ tabId, path: on && text === 'REC' ? 'icons/icon-rec.svg' : 'icons/icon.svg' }).catch(() => {});
+  pageIconById(tabId);
   const rec = on && text === 'REC';
   browser.action.setBadgeText({ tabId, text: on && !rec ? text : '' }).catch(() => {});
   if (on && !rec) browser.action.setBadgeBackgroundColor({ tabId, color }).catch(() => {});
@@ -110,7 +137,7 @@ function badge(tabId, on, text = 'REC', color = '#d32f2f') {
 function keepAlive() {
   if (ping) return;
   ping = setInterval(() => {
-    if (!recs.size && !dls.size && !waits.size) { clearInterval(ping); ping = null; return; }
+    if (!recs.size && !dls.size && !waits.size && !fsJobs.size) { clearInterval(ping); ping = null; return; }
     browser.runtime.getPlatformInfo();
   }, 10000);
 }
@@ -123,7 +150,30 @@ function onWorker(r, d) {
   } else if (d.t === 'end') finish(r);
 }
 
+// silence detector: a player is playing, yet nothing audible reaches the recording (DRM, players that hide the sound)
+const SIL_MS = 7000;
+const drmOf = (tabId) => browser.tabs.sendMessage(tabId, { type: 'media' }, { frameId: 0 }).then((l) => (l || []).some((e) => e.drm)).catch(() => false);
+function warnBadge(tabId, on) {
+  browser.action.setBadgeText({ tabId, text: on ? '!' : '' }).catch(() => {});
+  if (on) browser.action.setBadgeBackgroundColor({ tabId, color: '#f9a825' }).catch(() => {});
+}
+function heard(r, buf) {
+  for (let i = 0; i < buf.length; i += 3) {
+    const v = buf[i];
+    if (v > 2 || v < -2) { r.loudAt = Date.now(); if (r.warn) { r.warn = ''; warnBadge(r.tabId, false); } return; }
+  }
+}
+async function silCheck(r) {
+  if (r.stopping || recs.get(r.tabId) !== r) return;
+  if (!r.warn && Date.now() - r.loudAt > SIL_MS && [...r.busy.values()].some((x) => x.v)) {
+    const drm = await drmOf(r.tabId);
+    if (!r.warn && Date.now() - r.loudAt > SIL_MS) r.warn = drm ? 'drm' : 'silent';
+  }
+  if (r.warn) warnBadge(r.tabId, true);
+}
+
 async function finish(r) {
+  clearInterval(r.silT);
   stopStreams(String(r.tabId));
   r.worker.terminate();
   recs.delete(r.tabId);
@@ -135,10 +185,10 @@ async function finish(r) {
 async function start(tabId, kbps, opts = {}) {
   if (recs.has(tabId)) return { ok: true };
   waits.delete(tabId);
-  const r = { id: `${Date.now()}-${tabId}`, tabId, sr: opts.sr > 0 ? opts.sr : 44100, startedAt: opts.t0 ? Math.floor(opts.t0) : Date.now(), kbps, bytes: 0, seq: 0, chain: Promise.resolve(), title: '', host: '', stopping: false, auto: !!opts.auto, busy: new Map(), endT: null, endAt: 0 };
+  const r = { id: `${Date.now()}-${tabId}`, tabId, sr: opts.sr > 0 ? opts.sr : 44100, startedAt: opts.t0 ? Math.floor(opts.t0) : Date.now(), kbps, bytes: 0, seq: 0, chain: Promise.resolve(), title: '', host: '', stopping: false, auto: !!opts.auto, busy: new Map(), endT: null, endAt: 0, warn: '', loudAt: Date.now(), silT: 0 };
   r.worker = new Worker('encoder.worker.js');
   r.worker.onmessage = (ev) => onWorker(r, ev.data);
-  r.worker.postMessage({ t: 'init', kbps, sr: r.sr, startEpoch: r.startedAt });
+  r.worker.postMessage({ t: 'init', kbps, sr: r.sr, startEpoch: r.startedAt, trim: true });
   recs.set(tabId, r);
   let resp = null;
   try { resp = await browser.tabs.sendMessage(tabId, { type: 'rec', mode: 'on' }); } catch (e) { /* no receiver */ }
@@ -146,6 +196,8 @@ async function start(tabId, kbps, opts = {}) {
   r.title = resp.title; r.host = resp.host;
   await putMeta({ id: r.id, title: r.title, host: r.host, startedAt: r.startedAt, saved: false, fmt: kbps === 0 ? 'wav' : 'mp3', sr: r.sr });
   badge(tabId, true);
+  r.silT = setInterval(() => silCheck(r), 1000);
+  drmOf(tabId).then((d) => { if (d && recs.get(tabId) === r && !r.stopping) { r.warn = 'drm'; warnBadge(tabId, true); } });
   keepAlive();
   return { ok: true };
 }
@@ -171,6 +223,7 @@ async function watch(tabId, kbps) {
   try { resp = await browser.tabs.sendMessage(tabId, { type: 'rec', mode: 'watch' }); } catch (e) { /* no receiver */ }
   if (!resp || !resp.ok) { waits.delete(tabId); return { error: 'unsupported' }; }
   badge(tabId, true, 'WAIT', '#f57c00');
+  drmOf(tabId).then((d) => { const w = waits.get(tabId); if (d && w) w.warn = 'drm'; });
   keepAlive();
   return { ok: true };
 }
@@ -217,7 +270,7 @@ async function fetchForTab(tabId, frameId, id, url) {
     if (n && n <= 60e6) return { blob: await resp.blob() };
     const r = recs.get(tabId);
     if (!r && resp.body) { resp.body.cancel(); return { norec: true }; }
-    const s = r && !r.stopping && startStream(resp, (d) => r.worker.postMessage({ t: 'pcm', k: 'st' + frameId + ':' + id, ts: d.ts, buf: d.buf }, [d.buf.buffer]));
+    const s = r && !r.stopping && startStream(resp, (d) => { heard(r, d.buf); r.worker.postMessage({ t: 'pcm', k: 'st' + frameId + ':' + id, ts: d.ts, buf: d.buf }, [d.buf.buffer]); });
     if (!s) { if (resp.body) resp.body.cancel(); return {}; }
     streams.set(tabId + ':' + frameId + ':' + id, s);
     return { stream: true };
@@ -227,10 +280,11 @@ async function fetchForTab(tabId, frameId, id, url) {
 browser.runtime.onMessage.addListener((m, sender) => {
   const tabId = sender.tab && sender.tab.id;
   switch (m.type) {
+    case 'hasMedia': if (tabId != null && !withMedia.has(tabId)) { withMedia.add(tabId); pageIconById(tabId); } return;
     case 'hello': return Promise.resolve({ on: recs.has(tabId) && !recs.get(tabId).stopping, watch: waits.has(tabId) });
     case 'pcm': {
       const r = recs.get(tabId);
-      if (r && !r.stopping) r.worker.postMessage({ t: 'pcm', k: sender.frameId, ts: m.ts, at: m.at, buf: m.buf }, [m.buf.buffer]);
+      if (r && !r.stopping) { heard(r, m.buf); r.worker.postMessage({ t: 'pcm', k: sender.frameId, ts: m.ts, at: m.at, buf: m.buf }, [m.buf.buffer]); }
       return;
     }
     case 'fetchBlob': return fetchForTab(tabId, sender.frameId, m.id, m.url);
@@ -268,9 +322,11 @@ browser.runtime.onMessage.addListener((m, sender) => {
     case 'unwatch': return unwatch(m.tabId);
     case 'start': return start(m.tabId, m.kbps, { sr: m.sr });
     case 'stop': return stop(m.tabId);
+    case 'fast': return fastSave(m.tabId, m.kbps);
+    case 'fastNow': return fastNow(m.tabId);
     case 'state': {
       const r = recs.get(m.tabId);
-      return Promise.resolve({ recording: !!r && !r.stopping, saving: !!r && r.stopping, waiting: waits.has(m.tabId), auto: !!r && r.auto, elapsed: r ? Date.now() - r.startedAt : 0, bytes: r ? r.bytes : 0 });
+      return Promise.resolve({ recording: !!r && !r.stopping, saving: !!r && r.stopping, waiting: waits.has(m.tabId), auto: !!r && r.auto, elapsed: r ? Date.now() - r.startedAt : 0, bytes: r ? r.bytes : 0, fast: fsState(m.tabId), warn: r ? r.warn : (waits.get(m.tabId) || {}).warn || '' });
     }
     case 'recovered': return recovered();
     case 'recSave': return allMeta().then((all) => { const x = all.find((y) => y.id === m.id); return x ? saveRec(x) : false; });
@@ -279,8 +335,40 @@ browser.runtime.onMessage.addListener((m, sender) => {
 });
 
 // ---------- hotkeys ----------
-browser.commands.onCommand.addListener(async (cmd) => {
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+// address bar icon: only on web pages with sound (media element, sound playing, recording or waiting), unless turned off
+let pageIcon = true;
+const withMedia = new Set();
+function pageIconFor(tab) {
+  if (!browser.pageAction || !tab) return;
+  const id = tab.id;
+  if (pageIcon && /^https?:/i.test(tab.url || '') && (tab.audible || withMedia.has(id) || recs.has(id) || waits.has(id))) browser.pageAction.show(id).catch(() => {});
+  else browser.pageAction.hide(id).catch(() => {});
+}
+function pageIconById(id) { browser.tabs.get(id).then(pageIconFor, () => {}); }
+async function refreshPageIcons() { for (const t of await browser.tabs.query({})) pageIconFor(t); }
+browser.storage.local.get({ pageIcon: true }).then((st) => { pageIcon = st.pageIcon !== false; refreshPageIcons(); });
+browser.storage.onChanged.addListener((c, area) => { if (area === 'local' && c.pageIcon) { pageIcon = c.pageIcon.newValue !== false; refreshPageIcons(); } });
+browser.tabs.onUpdated.addListener((id, ch, tab) => {
+  if (ch.status === 'loading') withMedia.delete(id);
+  if (ch.status || ch.url || 'audible' in ch) pageIconFor(tab);
+});
+browser.tabs.onRemoved.addListener((id) => withMedia.delete(id));
+
+// whole-track save from a hotkey reports in the page title
+const note = (tabId, text) => browser.tabs.sendMessage(tabId, { type: 'note', text }, { frameId: 0 }).catch(() => {});
+const tr = (k) => browser.i18n.getMessage(k);
+function noteFast(tabId) {
+  const t = setInterval(() => {
+    const s = fsState(tabId);
+    if (s && s.run) { note(tabId, `⬇ ${s.collecting ? s.pct : s.p}%`); return; }
+    clearInterval(t);
+    if (s && s.err) { note(tabId, `⚠ ${tr('err_' + s.err)}`); setTimeout(() => note(tabId, ''), 8000); }
+    else { note(tabId, `✓ ${tr('fast_done')}`); setTimeout(() => note(tabId, ''), 4000); }
+  }, 500);
+}
+
+async function runCommand(cmd, given) {
+  const [tab] = given ? [given] : await browser.tabs.query({ active: true, currentWindow: true });
   if (!tab) return;
   const { kbps = 192 } = await browser.storage.local.get('kbps');
   if (cmd === 'toggle-record') {
@@ -291,5 +379,12 @@ browser.commands.onCommand.addListener(async (cmd) => {
     if (recs.has(tab.id)) await stop(tab.id);
     else if (waits.has(tab.id)) await unwatch(tab.id);
     else await watch(tab.id, kbps);
+  } else if (cmd === 'fast-save') {
+    const j = fsJobs.get(tab.id);
+    if (j) { if (j.collecting) fastNow(tab.id); return; }
+    const res = await fastSave(tab.id, kbps);
+    if (res && res.error) { note(tab.id, `⚠ ${tr('err_' + res.error)}`); setTimeout(() => note(tab.id, ''), 8000); }
+    else noteFast(tab.id);
   }
-});
+}
+browser.commands.onCommand.addListener((cmd) => { runCommand(cmd); });

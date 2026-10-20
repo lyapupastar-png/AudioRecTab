@@ -16,3 +16,8 @@ button.dev{background:#455a64}
 
 label.col{flex-direction:column;align-items:stretch;gap:3px}
 input{font:inherit;padding:4px;box-sizing:border-box;width:100%}
+label.chk{justify-content:flex-start;gap:6px;cursor:pointer}
+label.chk input{width:auto;margin:0}
+button.fast{background:#2e7d32}
+#warn{margin:6px 0;padding:6px;background:#fff4d6;border-radius:4px}
+button.gear{float:right;width:auto;padding:0 2px;margin:0;background:none;color:#1f2937;font-size:17px;line-height:1}

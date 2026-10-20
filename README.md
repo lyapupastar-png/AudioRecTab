@@ -8,6 +8,11 @@ tabs, notifications and system sounds stay out of the file.
 
 - Record the current tab with one click, or with a hotkey
   (`Alt+Shift+R` by default).
+- Works without the toolbar button: an icon in the address bar opens the
+  window (`Alt+Shift+O`), a hotkey saves the whole track (`Alt+Shift+S`) and
+  reports progress in the tab title, and the settings page (Add-ons and
+  themes → AudioRecTab → Settings) holds the options and a link to change
+  the shortcuts.
 - "Wait for sound" mode (`Alt+Shift+W`): recording starts when audio
   begins and stops when the track ends or after 5 seconds of pause.
 - MP3 (selectable bitrate) or WAV output, with a file name template.
@@ -16,6 +21,14 @@ tabs, notifications and system sounds stay out of the file.
 - Recording from an audio device (microphone, virtual cable, Stereo Mix,
   PipeWire/PulseAudio monitor) for sound a tab does not hand over, with a
   built-in setup guide for macOS, Windows and Linux.
+- Save a whole track at once, without playing it: direct audio files, HLS
+  playlists (TS or fMP4 segments; AAC, MP3, Opus; AES-128) and, where a site
+  has no HLS, DASH manifests (fMP4 or WebM). On other players the original
+  audio the player loads is collected and saved as soon as the whole track
+  has loaded or played (or on request). Live streams and DRM-protected music
+  can only be recorded.
+- An option to ignore the site's player volume and the tab mute, so the
+  recording keeps the full level.
 - Unsaved recordings survive a browser crash and can be saved afterwards.
 - Interface in English, Russian and Ukrainian.
 

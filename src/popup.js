@@ -5,6 +5,7 @@ const send = (m) => browser.runtime.sendMessage(m);
 const q = new URLSearchParams(location.search);
 let tabId = null, st = { recording: false };
 document.querySelectorAll('[data-i18n]').forEach((e) => { e.textContent = t(e.dataset.i18n); });
+document.querySelectorAll('[data-i18n-title]').forEach((e) => { e.title = t(e.dataset.i18nTitle); });
 const fmt = (ms) => { const s = Math.floor(ms / 1000); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 
 // do not rewrite unchanged text: otherwise selection and copying are reset every 0.5 s
@@ -20,6 +21,13 @@ async function tick() {
   b2.className = auto ? 'rec' : st.waiting ? 'wait' : '';
   setText(b2, t(auto ? 'stop' : st.waiting ? 'unwatch' : 'watch'));
   b2.disabled = st.saving || manual;
+  $('warn').hidden = !st.warn;
+  setText($('warn'), st.warn ? t('warn_' + st.warn) : '');
+  const fast = st.fast || {};
+  setText($('btn4'), fast.collecting ? `${t('fast_collect')} ${fast.pct}% · ${t('fast_collect_now')}` : fast.run ? `${t('fast_saving')} ${fast.p}%` : t('fast_btn'));
+  $('btn4').disabled = (!!fast.run && !fast.collecting) || st.saving;
+  if (fast.err && !$('btn4').dataset.err) { $('err').hidden = false; $('err').textContent = t('err_' + fast.err) + (fast.err === 'fast' || fast.err === 'codec' ? ' ' + fast.detail : ''); }
+  $('btn4').dataset.err = fast.err ? '1' : '';
   setText($('btn3'), t('device_btn'));
   $('btn3').disabled = st.saving || st.recording || st.waiting;
   setText($('info'), st.recording ? `${t(auto ? 'recording_auto' : 'recording')} ${fmt(st.elapsed)} · ${(st.bytes / 1048576).toFixed(2)} MB` : st.waiting ? t('waiting') : t('idle'));
@@ -46,8 +54,7 @@ async function loadRecovered() {
   tabId = q.get('tabId') ? +q.get('tabId') : (await browser.tabs.query({ active: true, currentWindow: true }))[0].id;
   const { kbps = 192 } = await browser.storage.local.get('kbps');
   $('kbps').value = String(kbps);
-  $('nameTpl').value = (await browser.storage.local.get('nameTpl')).nameTpl || '';
-  $('nameTpl').onchange = () => browser.storage.local.set({ nameTpl: $('nameTpl').value.trim() });
+  $('gear').onclick = () => { browser.runtime.openOptionsPage(); window.close(); };
   $('kbps').onchange = () => browser.storage.local.set({ kbps: +$('kbps').value });
   $('btn').onclick = async () => {
     $('btn').disabled = true;
@@ -60,6 +67,13 @@ async function loadRecovered() {
     $('btn2').disabled = true;
     $('err').hidden = true;
     const r = await send({ type: st.recording ? 'stop' : st.waiting ? 'unwatch' : 'watch', tabId, kbps: +$('kbps').value });
+    if (r && r.error) { $('err').hidden = false; $('err').textContent = t('err_' + r.error); }
+    await tick();
+  };
+  $('btn4').onclick = async () => {
+    $('btn4').disabled = true;
+    $('err').hidden = true;
+    const r = await send(st.fast && st.fast.collecting ? { type: 'fastNow', tabId } : { type: 'fast', tabId, kbps: +$('kbps').value });
     if (r && r.error) { $('err').hidden = false; $('err').textContent = t('err_' + r.error); }
     await tick();
   };

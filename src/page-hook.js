@@ -12,7 +12,14 @@
   const post = (o, tr) => window.postMessage(Object.assign({ [CH]: 1 }, o), '*', tr || []);
   const seen = new WeakSet(), routed = new WeakSet(), taps = new WeakMap();
   const mediaRefs = new Set(), tapRefs = new Set();
+  let elSaid = false;
   let rec = null, wantOn = false, sendOn = false, watchOn = false;
+  // ignore site sound settings: a context fed only by media elements is recorded from the elements themselves
+  // (its gain and the tab mute come after them); a context with sounds of its own is recorded from its output
+  let ign = true;
+  const elCtx = new WeakMap(), hasEl = new WeakSet(), mixed = new WeakSet();
+  const direct = (el) => ign && elCtx.has(el) && !mixed.has(elCtx.get(el));
+  const skipTap = (ctx) => ign && hasEl.has(ctx) && !mixed.has(ctx);
   // elements that started playing and have not ended; used to stop an auto recording at the end of the track
   const live = new Set();     // playing right now
   const paused = new Set();   // were playing, now paused (not ended)
@@ -35,7 +42,7 @@
 
   function attachEl(el) {
     const r = rec;
-    if (!r || routed.has(el) || r.els.has(el)) return;
+    if (!r || (routed.has(el) && !direct(el)) || r.els.has(el)) return;
     let stream;
     try { stream = el.captureStream ? el.captureStream() : el.mozCaptureStream(); } catch (e) { return; }
     const ent = { stream, src: null, an: null, tid: null, q: 0, skip: false };
@@ -61,7 +68,7 @@
 
   function attachTap(ctx, t) {
     const r = rec;
-    if (!r || !t.node || r.tapSrc.has(ctx)) return;
+    if (!r || !t.node || r.tapSrc.has(ctx) || skipTap(ctx)) return;
     try {
       const s = r.ctx.createMediaStreamSource(t.node.stream);
       origConnect.call(s, r.mixer);
@@ -91,13 +98,13 @@
     if (r.send) { post({ k: 'pcm', ts, buf: out }, [out.buffer]); return; }
     // waiting for sound: keep the last blocks so the beginning of the sound is not lost
     r.ring.push({ ts, buf: out });
-    if (r.ring.length > 8) r.ring.shift();
+    while (r.ring.length > 12 && !r.sound) r.ring.shift();
     if (r.sound) return;
     if (pk > 0.001) {
-      if (!r.loud++) r.t0 = ts;
+      r.loud++;
       if (r.loud >= 2) {
         r.sound = true;
-        post({ k: 'sound', t0: r.t0 });
+        post({ k: 'sound', t0: r.ring[0].ts });
         // if nobody started the recording, allow another detection
         setTimeout(() => { if (rec === r && !r.send) { r.sound = false; r.loud = 0; } }, 3000);
       }
@@ -111,8 +118,8 @@
     r.watch = false;
     if (r.pend) { for (const q of r.pend) { const nid = ++fbId; fbReq.set(nid, q); post({ k: 'fetch', id: nid, url: q.url }); } r.pend = null; }
     clearTimeout(r.armT);
-    const t0 = r.t0 || 0;
-    for (const it of r.ring) if (it.ts >= t0 - 1) post({ k: 'pcm', ts: it.ts, buf: it.buf }, [it.buf.buffer]);
+    // all kept blocks go out: the encoder starts the file at the first audible sample, so a quiet fade-in is kept
+    for (const it of r.ring) post({ k: 'pcm', ts: it.ts, buf: it.buf }, [it.buf.buffer]);
     r.ring = [];
     lastBusy = '';
     updBusy();
@@ -232,7 +239,7 @@
     origConnect.call(mixer, proc);
     origConnect.call(proc, mute);
     origConnect.call(mute, ctx.destination);
-    rec = { ctx, mixer, proc, els: new Map(), tapSrc: new Map(), off: Infinity, buf: new Float32Array(1024), send: sendOn, armT: 0, watch: watchOn && !sendOn, ring: [], loud: 0, t0: 0, sound: false };
+    rec = { ctx, mixer, proc, els: new Map(), tapSrc: new Map(), off: Infinity, buf: new Float32Array(1024), send: sendOn, armT: 0, watch: watchOn && !sendOn, ring: [], loud: 0, sound: false };
     lastBusy = '';
     if (!sendOn && !watchOn) setArmTimer();
     proc.onaudioprocess = onProc;
@@ -268,6 +275,7 @@
     if (!(el instanceof HTMLMediaElement) || seen.has(el)) return;
     seen.add(el);
     mediaRefs.add(new WeakRef(el));
+    if (!elSaid) { elSaid = true; post({ k: 'hasel' }); }
     const gone = () => { live.delete(el); paused.delete(el); updBusy(); };
     el.addEventListener('playing', () => { live.add(el); paused.delete(el); everBusy = true; updBusy(); });
     // pause fires right before ended at the end of a track: that is an end, not a pause
@@ -288,11 +296,48 @@
     return t.node ? t : null;
   }
 
-  function markRouted(el) {
+  function markRouted(el, ctx) {
     if (!(el instanceof HTMLMediaElement)) return;
     routed.add(el);
-    const ent = rec && rec.els.get(el);
-    if (ent) { unlink(ent); rec.els.delete(el); }
+    if (ctx instanceof A) { elCtx.set(el, ctx); hasEl.add(ctx); }
+    reconcile();
+  }
+
+  // each source is captured once: the element itself or its context's output
+  function reconcile() {
+    const r = rec;
+    if (!r) return;
+    for (const ref of mediaRefs) {
+      const el = ref.deref();
+      if (!el || !routed.has(el)) continue;
+      const ent = r.els.get(el);
+      if (direct(el)) { if (!ent) attachEl(el); } else if (ent) { unlink(ent); r.els.delete(el); }
+    }
+    for (const ref of tapRefs) {
+      const c = ref.deref(), t = c && taps.get(c);
+      if (!t || !t.node) continue;
+      const src = r.tapSrc.get(c);
+      if (!skipTap(c)) { if (!src) attachTap(c, t); } else if (src) { try { src.disconnect(); } catch (e) { /* ignore */ } r.tapSrc.delete(c); }
+    }
+  }
+
+  const markMixed = (ctx) => {
+    if (!(ctx instanceof A) || (rec && ctx === rec.ctx) || mixed.has(ctx)) return;
+    mixed.add(ctx);
+    reconcile();
+  };
+  for (const m of ['createOscillator', 'createBufferSource', 'createConstantSource', 'createMediaStreamSource', 'createMediaStreamTrackSource']) {
+    const o = A.prototype[m];
+    if (o) A.prototype[m] = function () { try { markMixed(this); } catch (e) { /* ignore */ } return o.apply(this, arguments); };
+  }
+  for (const n of ['OscillatorNode', 'AudioBufferSourceNode', 'ConstantSourceNode', 'MediaStreamAudioSourceNode', 'MediaStreamTrackAudioSourceNode']) {
+    if (!window[n]) continue;
+    window[n] = new Proxy(window[n], { construct(t, args, nt) { try { markMixed(args[0]); } catch (e) { /* ignore */ } return Reflect.construct(t, args, nt); } });
+  }
+  if (window.AudioWorkletNode) {
+    window.AudioWorkletNode = new Proxy(window.AudioWorkletNode, {
+      construct(t, args, nt) { try { if (args[2] && args[2].numberOfInputs === 0) markMixed(args[0]); } catch (e) { /* ignore */ } return Reflect.construct(t, args, nt); }
+    });
   }
 
   NP.connect = function (dest) {
@@ -316,13 +361,13 @@
     return res;
   };
   A.prototype.createMediaElementSource = function (el) {
-    try { markRouted(el); } catch (e) { /* ignore */ }
+    try { markRouted(el, this); } catch (e) { /* ignore */ }
     return origCMES.apply(this, arguments);
   };
   if (window.MediaElementAudioSourceNode) {
     window.MediaElementAudioSourceNode = new Proxy(window.MediaElementAudioSourceNode, {
       construct(target, args, nt) {
-        try { markRouted(args[1] && args[1].mediaElement); } catch (e) { /* ignore */ }
+        try { markRouted(args[1] && args[1].mediaElement, args[0]); } catch (e) { /* ignore */ }
         return Reflect.construct(target, args, nt);
       }
     });
@@ -342,11 +387,106 @@
     window.addEventListener(ev, kick, true);
   }
 
+  // the original bytes a player hands to MSE (audio-only buffers): a track can be saved from its source
+  const caps = [], capOf = new WeakMap(), capUrl = new Map(), sbRec = new WeakMap(), CAP_MAX = 200e6;
+  let capBytes = 0;
+  const audioMime = (m) => /^audio\//i.test(m) || (!/avc|hev|hvc|vp8|vp9|vp09|av01|dvh|theora/i.test(m) && /mp4a|opus|vorbis|flac/i.test(m));
+  const capFor = (msrc) => {
+    let c = capOf.get(msrc);
+    if (!c) {
+      capOf.set(msrc, (c = { ms: msrc, sbs: [] }));
+      caps.push(c);
+      while (caps.length > 3) { const old = caps.shift(); for (const r of old.sbs) { capBytes -= r.bytes; r.chunks = []; r.bytes = 0; } }
+    }
+    return c;
+  };
+  if (window.MediaSource && window.SourceBuffer) {
+    const MSP = MediaSource.prototype, SBP = SourceBuffer.prototype;
+    const origURL = URL.createObjectURL, origAdd = MSP.addSourceBuffer, origApp = SBP.appendBuffer, origAbort = SBP.abort;
+    URL.createObjectURL = function (o) {
+      const u = origURL.apply(this, arguments);
+      try { if (o instanceof MediaSource) capUrl.set(u, capFor(o)); } catch (e) { /* ignore */ }
+      return u;
+    };
+    MSP.addSourceBuffer = function (mime) {
+      const sb = origAdd.apply(this, arguments);
+      try {
+        if (audioMime(String(mime))) {
+          const r = { kind: /webm/i.test(mime) ? 'webm' : 'mp4', chunks: [], bytes: 0, ranges: [], full: false };
+          capFor(this).sbs.push(r);
+          sbRec.set(sb, r);
+          post({ k: 'mshas' });
+        }
+      } catch (e) { /* ignore */ }
+      return sb;
+    };
+    SBP.appendBuffer = function (data) {
+      try {
+        const r = sbRec.get(this);
+        if (r && !r.full) {
+          const u = data instanceof ArrayBuffer ? new Uint8Array(data.slice(0)) : new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+          if (capBytes + u.length > CAP_MAX) r.full = true;
+          else {
+            r.chunks.push({ b: u, off: this.timestampOffset });
+            r.bytes += u.length;
+            capBytes += u.length;
+            const sb = this;
+            sb.addEventListener('updateend', () => {
+              try {
+                const br = sb.buffered;
+                for (let i = 0; i < br.length; i++) r.ranges.push([br.start(i), br.end(i)]);
+                r.ranges.sort((x, y) => x[0] - y[0]);
+                const mg = [];
+                for (const x of r.ranges) { const l = mg[mg.length - 1]; if (l && x[0] <= l[1] + 0.05) l[1] = Math.max(l[1], x[1]); else mg.push(x.slice()); }
+                r.ranges = mg;
+              } catch (e) { /* removed */ }
+            }, { once: true });
+          }
+        }
+      } catch (e) { /* never break the page */ }
+      return origApp.apply(this, arguments);
+    };
+    SBP.abort = function () {
+      try { const r = sbRec.get(this); if (r) r.chunks.push({ b: null }); } catch (e) { /* ignore */ }
+      return origAbort.apply(this, arguments);
+    };
+  }
+  function capPick() {
+    const els = [...document.querySelectorAll('audio,video')];
+    for (const ref of mediaRefs) { const el = ref.deref(); if (el && !els.includes(el)) els.push(el); }
+    const el = els.find((x) => !x.paused && capUrl.has(x.currentSrc)) || els.find((x) => capUrl.has(x.currentSrc));
+    const c = el ? capUrl.get(el.currentSrc) : caps[caps.length - 1];
+    if (!c) return null;
+    const r = c.sbs.filter((x) => x.bytes).sort((x, y) => y.bytes - x.bytes)[0];
+    if (!r) return null;
+    let dur = NaN;
+    try { dur = c.ms.duration; } catch (e) { /* ignore */ }
+    if (!(dur > 0) && el) dur = el.duration;
+    return { c, r, el, dur };
+  }
+
   window.addEventListener('message', (ev) => {
     if (ev.source !== window) return;
     const d = ev.data;
     if (!d || d[CH] !== 1) return;
     if (d.k === 'blob') { onBlob(d); return; }
+    if ((d.k === 'cfg' || d.k === 'cmd') && typeof d.ign === 'boolean' && d.ign !== ign) { ign = d.ign; reconcile(); }
+    if (d.k === 'msq') {
+      const x = capPick();
+      if (!x) { post({ k: 'msr', id: d.id, v: { has: false } }); return; }
+      if (x.el && x.el.mediaKeys) { post({ k: 'msr', id: d.id, v: { has: true, drm: true } }); return; }
+      if (d.op === 'd') post({ k: 'msr', id: d.id, v: { has: true, kind: x.r.kind, meta: x.r.chunks.map((c) => ({ off: c.off, n: c.b ? c.b.length : -1 })), blob: new Blob(x.r.chunks.filter((c) => c.b).map((c) => c.b)) } });
+      else post({ k: 'msr', id: d.id, v: { has: true, cov: x.r.ranges.reduce((n, g) => n + g[1] - g[0], 0), dur: x.dur, ended: !!(x.el && x.el.ended), full: x.r.full } });
+      return;
+    }
+    if (d.k === 'mq') {
+      const els = new Set(document.querySelectorAll('audio,video'));
+      for (const ref of mediaRefs) { const el = ref.deref(); if (el) els.add(el); }
+      let meta = null;
+      try { const m = navigator.mediaSession && navigator.mediaSession.metadata; if (m && m.title) meta = { title: String(m.title), artist: String(m.artist || '') }; } catch (e) { /* ignore */ }
+      post({ k: 'ml', id: d.id, list: [...els].map((el, i) => ({ src: el.currentSrc || el.src || '', dur: el.duration, playing: !el.paused && !el.ended, drm: !!el.mediaKeys, meta: i ? null : meta })) });
+      return;
+    }
     if (d.k !== 'cmd') return;
     if (d.mode === 'off') { wantOn = sendOn = watchOn = false; stopCapture(); return; }
     if (d.mode === 'arm' && watchOn) return;
